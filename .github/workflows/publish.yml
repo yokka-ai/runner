@@ -1,0 +1,38 @@
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # npm trusted publishing and the provenance attestation
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Trusted publishing needs npm 11.5.1 or newer, which ships with Node 24.
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - name: Tag, package.json and src/api.ts agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          src="$(sed -n 's/^export const VERSION = "\(.*\)";$/\1/p' src/api.ts)"
+          echo "tag=$tag package.json=$pkg src/api.ts=$src"
+          [ "$tag" = "$pkg" ] && [ "$tag" = "$src" ]
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: node dist/cli.js verify
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          # Only needed until trusted publishing is set up on npmjs.com; npm prefers OIDC when it's configured.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
