@@ -6,7 +6,9 @@ import { anyApi } from "convex/server";
  * code, so this file and PROTOCOL.md are the whole contract.
  */
 export const PROTOCOL = 1;
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
+/** Yokka's own server. `--server` or `YOKKA_SERVER` points the runner at another deployment. */
+export const DEFAULT_SERVER = "https://sync.yokka.ai";
 
 const fn = anyApi.runner;
 

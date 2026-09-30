@@ -14,11 +14,10 @@ Runs on macOS, Linux and Windows with Node 22 or newer.
 ## Start
 
 ```bash
-npx yokka-runner login --server https://<deployment>.convex.cloud
+npx yokka-runner login
 ```
 
-The board shows the exact command under **Settings → Agents → Runners**. It prints a code and opens the board to
-confirm it. Then, in each project's folder:
+It prints a code and opens the board to confirm it. Then, in each project's folder:
 
 ```bash
 npx yokka-runner map
@@ -58,7 +57,7 @@ app-server, so stopping the runner ends them (the thread stays in the Codex app)
 | Command | |
 | --- | --- |
 | `yokka-runner` | Connect and take runs |
-| `yokka-runner login` | Sign this machine in (`--server`, `--name`) |
+| `yokka-runner login` | Sign this machine in (`--name`; `--server` only for a deployment other than Yokka's) |
 | `yokka-runner map [folder]` | Link a folder to a project (`--project`, `--mode in-place\|worktree`, `--allow-dirty`) |
 | `yokka-runner unmap [project]` | Forget a project's folder |
 | `yokka-runner status` | Config, projects, and whether each agent is ready |
@@ -94,7 +93,8 @@ badge could only show what a runner says about itself, so the check that counts 
 ## Developing
 
 `npm ci`, then `npm start -- <command>` runs the source directly (Node 22.18 or newer strips the types).
-`npm run typecheck` checks it and `npm run build` compiles it to `dist/`.
+`npm run typecheck` checks it and `npm run build` compiles it to `dist/`. Against your own Yokka deployment, sign in
+with `npm start -- login --server <its client URL>` (or set `YOKKA_SERVER`); the runner remembers it.
 
 ## Releasing
 

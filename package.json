@@ -1,6 +1,6 @@
 {
   "name": "yokka-runner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Starts Claude Code and Codex on your machine for cards on your Yokka board.",
   "license": "MIT",
   "repository": {

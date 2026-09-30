@@ -6,7 +6,7 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { claudeAdapter } from "./adapters/claude.ts";
 import { codexAdapter } from "./adapters/codex.ts";
-import { httpClient, liveClient, PROTOCOL, VERSION } from "./api.ts";
+import { DEFAULT_SERVER, httpClient, liveClient, PROTOCOL, VERSION } from "./api.ts";
 import { type Config, configPath, loadConfig, saveConfig, setKey, type WorkspaceModeName } from "./config.ts";
 import { runDaemon } from "./daemon.ts";
 import { openUrl } from "./proc.ts";
@@ -27,7 +27,7 @@ Commands
   verify              Show this build's version and how to check where it came from
 
 Options
-  --server <url>      Your deployment's URL (login only; printed on the board's runner page)
+  --server <url>      Another Yokka deployment's URL, for self-hosting or development (login only)
   --name <name>       What the board calls this runner (login only)
   --project <id>      The project to map (map only; asks when left out)
   --mode <mode>       in-place or worktree (map only)
@@ -87,13 +87,11 @@ async function main() {
   }
 }
 
-async function login(config: Config, server = config.server ?? process.env.YOKKA_SERVER, name?: string) {
-  if (!server) {
-    throw new Error(
-      "Pass your deployment's URL: yokka-runner login --server https://<deployment>.convex.cloud\n" +
-        "The board shows the exact command under Settings, Agents, Runners.",
-    );
-  }
+async function login(
+  config: Config,
+  server = config.server ?? process.env.YOKKA_SERVER ?? DEFAULT_SERVER,
+  name?: string,
+) {
   config.server = server.replace(/\/$/, "");
   if (name) config.name = name;
   const api = httpClient(config.server);

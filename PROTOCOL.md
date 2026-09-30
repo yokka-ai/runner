@@ -1,7 +1,7 @@
 # Runner protocol, version 1
 
 This is the whole contract between `yokka-runner` and a Yokka deployment. The runner calls Convex functions on
-the deployment (`https://<deployment>.convex.cloud`) over the Convex client: a websocket for the live
+the server (`https://sync.yokka.ai` unless `--server` says otherwise) over the Convex client: a websocket for the live
 subscription, plain calls for the rest. It only ever connects outward.
 
 **What the server can ask for.** Nothing in this protocol carries a path, a shell command or anything to execute.
