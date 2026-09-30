@@ -39,7 +39,7 @@ export interface Session {
   /** For the ledger: Claude's short background id. */
   readonly shortId?: string;
   state(): Promise<AgentState>;
-  /** Why it's blocked or why it died, when the adapter can tell. */
+  /** Why it's blocked or crashed, when the adapter can tell. */
   blockedReason?(): Promise<string | undefined>;
   /** Stops the agent's work without losing its conversation. */
   pause(): Promise<void>;

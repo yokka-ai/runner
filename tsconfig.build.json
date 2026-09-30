@@ -1,0 +1,12 @@
+{
+  // The published build: src/ compiled to dist/, `.ts` import specifiers rewritten to `.js`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["src"]
+}

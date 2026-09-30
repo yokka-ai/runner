@@ -1,17 +1,33 @@
 {
+  // Typecheck config for the source, the tests, the scripts and the tool configs (`npm run typecheck`). The
+  // published build is tsconfig.build.json, which extends this one and emits dist/ from src/ only.
+  // The runner supports Node 22 and newer, so it targets what Node 22 runs natively, against Node 22's types.
   "compilerOptions": {
     "target": "ES2023",
+    "lib": ["ES2023"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "outDir": "dist",
-    "rootDir": "src",
-    "strict": true,
-    "skipLibCheck": true,
-    "erasableSyntaxOnly": true,
-    "verbatimModuleSyntax": true,
+    "types": ["node"],
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
-    "types": ["node"]
+
+    // Strictness. Deliberately not enabled: exactOptionalPropertyTypes and noPropertyAccessFromIndexSignature
+    // (the latter fights Biome's useLiteralKeys).
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+    "noEmit": true
   },
-  "include": ["src"]
+  "include": ["src", "test", "scripts", "vitest.config.ts"]
 }

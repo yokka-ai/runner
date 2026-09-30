@@ -1,18 +1,22 @@
-# Runner protocol, version 1
+# Runner protocol, version 2
 
 This is the whole contract between `yokka-runner` and a Yokka deployment. The runner calls Convex functions on
-the server (`https://sync.yokka.ai` unless `--server` says otherwise) over the Convex client: a websocket for the live
-subscription, plain calls for the rest. It only ever connects outward.
+the server (`https://sync.yokka.ai` unless `login --server` or `YOKKA_SERVER` says otherwise) over the Convex
+client: a websocket for the live subscription, plain calls for the rest. It only ever connects outward.
 
 **What the server can ask for.** Nothing in this protocol carries a path, a shell command or anything to execute.
 The server can say "run R: start card C with agent A", "pause run R", "resume run R", "hand run R over" and
 "stop run R". Anything the agent needs a person for is answered in the agent's own app, never through this
-protocol. Which folder a project lives in, how a run's folder is prepared and
-which flags an agent gets are decided by the runner, from its local config (`~/.yokka/runner.json`).
+protocol. Which folder a project lives in, how a run's folder is prepared and which flags an agent gets are
+decided by the runner, from its local config (`~/.yokka/runner.json`).
 
 Every call below except sign-in takes `token`, the runner's own token (`yr_` plus 40 characters). The server keeps
-only its SHA-256 hash. A disconnected runner's calls fail with an `unauthenticated` error that says so, and `work`
-returns `{ revoked: true }`.
+only its SHA-256 hash. A disconnected runner's calls fail with an app error (a `ConvexError` whose data is
+`{ code, message }`) with code `unauthenticated` and a message that says so, and `work` returns
+`{ revoked: true }`. The runner stops on either.
+
+The deployment URL must be `https:`; plain `http:` is accepted only for a deployment on the same machine
+(`localhost`, `127.0.0.1`, `[::1]`), for local development.
 
 ## Sign-in (device code)
 
@@ -52,7 +56,7 @@ minutes.
 | `runner:claim` | action | `runId` | `{ ok: false, reason }` or `{ ok: true, attempt, prompt, launchCode, ref, projectId, agent, workspaceMode, mcp }` |
 | `runner:update` | mutation | `runId`, `attempt`, and any of `status`, `clientSessionId`, `openUrl`, `note`, `summary`, `git` | `{ ok }` |
 | `runner:uploaded` | mutation | `runId`, `attempt`, `uploadId`, `error?` | `{ ok }` |
-| `runner:attach` | mutation | `runId`, `attempt`, `filename`, `contentType?`, `caption?` | `{ ok, uploadUrl, … }` or `{ ok: false, error }` |
+| `runner:attach` | mutation | `runId`, `attempt`, `filename`, `contentType?`, `caption?` | `{ ok: false, error }` or `{ ok: true, uploadUrl, filename, contentType, maxBytes }` |
 
 - **Claim** takes a queued run. It checks the runner's and the plan's concurrency limits and bumps `attempt`,
   which fences every later call: an update with an old attempt is ignored. It mints an MCP token for this run
@@ -62,17 +66,48 @@ minutes.
   code to `claim_card`, which binds its MCP session to the run; from then on the agent's own calls move the run
   (`request_input` to waiting for input, `complete_card` to done, `release_card` to released).
 - **Update** statuses a runner may set: `launched` (the session started), `running` (it moved again after being
-  blocked, or resumed), `paused`, `waiting_approval`, `handed_off`, and the final `done`, `failed`, `cancelled`, `lost`. `openUrl` must
-  be `https:`, `claude:` or `codex:`. After a run ended, only `git` is still accepted, for ten minutes.
-- **Pause and resume**: when `pause` turns on, stop the agent's work without losing its conversation and report
-  `paused`; when it turns off, wake the same session ("Continue where you left off.") and report `running`.
-- **When the agent needs a person** (a permission prompt, a sign-in, a question), report `waiting_approval` with a
-  `note`; the card flags the person, who answers in the agent's app. Report `running` when it moves again.
-- **Uploads**: read `path` inside the run's folder only (resolve symlinks; refuse anything outside), PUT the bytes
-  to `uploadUrl` with a `Content-Type`, then call `uploaded`, with `error` if it couldn't.
+  blocked, or resumed), `paused`, `waiting_approval`, `handed_off`, and the final `done`, `failed`, `cancelled`,
+  `lost`. `openUrl` must be `https:`, `claude:` or `codex:`. After a run ended, only `git` is still accepted, for
+  ten minutes.
+- **Pause and resume**: when `pause` turns on, the runner stops the agent's work without losing its conversation
+  and reports `paused`; when it turns off, it wakes the same session ("Continue where you left off.") and reports
+  `running`. A run that is `paused` when a restarted runner picks it back up stays paused until `pause` clears.
+  `cancel` wins over everything else, and `handOff` over `pause`.
+- **When the agent needs a person** (a permission prompt, a sign-in, a question), the runner reports
+  `waiting_approval` with a `note` saying where; the card flags the person, who answers in the agent's app. It
+  reports `running` when the agent moves again. A run already `waiting_input` (the agent asked over MCP) isn't
+  reported again.
+- **Uploads**: for each entry in `uploads`, the runner reads `path` inside the run's folder (resolved with symlinks;
+  anything outside is refused), PUTs it to `uploadUrl` with a `Content-Type` and reports with `uploaded` (an
+  `error` when it couldn't). `uploadUrl` must be `https:` under `/mcp/upload/` on the deployment: its own origin,
+  its `.convex.site` twin, or the origin of the run's `mcp.url`. Files over 20 MB are refused locally.
+- **attach** mints an upload link for a file the runner found itself (a Codex image, say). The server offers it;
+  this runner doesn't call it yet.
+
+## What the runner checks
+
+- **Every answer is checked** against the shapes above before the runner acts on it. Fields it doesn't know are
+  dropped; a `status` or `agent` it doesn't know is kept as text and left alone (it only takes runs for agents it
+  has). An answer that doesn't fit makes that call fail, or that `work` update be skipped, with a message naming
+  the field.
+- **Claims**: `launchCode` is `r_` plus letters and digits, and `mcp.url` and `mcp.link` are `https:` URLs. The
+  worktree folder and branch are built from slugs of `ref`, `title` and `launchCode`, never from raw text.
+- **Links it opens** on the person's machine (`verifyUrl`, session links) must be `https:`, `claude:` or `codex:`.
+- **Deadlines and retries**: every call gets 30 s (claims 60 s). Network failures and timeouts are retried with
+  exponential backoff and jitter for `hello` and final status updates (`done`, `failed`, `cancelled`, `lost`), so
+  the server must keep those safe to repeat. Claims are never retried; a refused claim is tried again only on the
+  next `work` update. A failed `work` query is subscribed again with backoff. App errors are never retried.
+- **Secrets**: the runner token lives in `~/.yokka/runner.json` (mode 0600; on Windows, inherited access removed),
+  the run token only in the run's MCP config file (Claude) or on the Codex app-server's stdin. Neither ever goes on
+  a command line or into the runner's output.
+- **The agent's permissions**: nothing the agent asks for is approved through this protocol. The run's own Yokka
+  tools are pre-approved (its token reaches one project); a Codex request for anything else is declined.
 
 ## Versioning
 
 The server announces its protocol in `hello`. Additions that old runners can ignore (a new field in `work`, a new
 optional argument) keep the version. Anything else bumps it, and the server keeps accepting the previous version
 until the minimum is raised.
+
+Version 2 removed replies (`messages`, `delivered`), approvals on the card (`approvals`, `requestApproval`) and
+plain-chat questions (`askedInChat`), and added `pause` and the `paused` status; the server refuses version 1.

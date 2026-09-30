@@ -11,25 +11,31 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: npm
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           # Trusted publishing needs npm 11.5.1 or newer, which ships with Node 24.
-          node-version: 24
+          node-version-file: .nvmrc
           registry-url: https://registry.npmjs.org
           cache: npm
-      - name: Tag, package.json and src/api.ts agree
+      - name: The tag and package.json agree (the runner reads its version from package.json)
+        shell: bash
         run: |
           tag="${GITHUB_REF_NAME#v}"
           pkg="$(node -p "require('./package.json').version")"
-          src="$(sed -n 's/^export const VERSION = "\(.*\)";$/\1/p' src/api.ts)"
-          echo "tag=$tag package.json=$pkg src/api.ts=$src"
-          [ "$tag" = "$pkg" ] && [ "$tag" = "$src" ]
-      - run: npm ci
+          echo "tag=$tag package.json=$pkg"
+          [ "$tag" = "$pkg" ]
+      - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
-      - run: npm run build
+      - run: npx biome ci
+      - run: npm run test:coverage
+      - name: Pack (dry run) and check the file list
+        run: npm run pack:check
       - run: node dist/cli.js verify
       - name: Publish
         run: npm publish --provenance --access public

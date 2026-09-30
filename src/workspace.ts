@@ -1,5 +1,6 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { GitState } from "./api.ts";
 import type { ProjectConfig, WorkspaceModeName } from "./config.ts";
 import { isWindows, run } from "./proc.ts";
 
@@ -35,15 +36,36 @@ async function defaultBranch(cwd: string) {
   return current.stdout.trim() || "main";
 }
 
-function slug(text: string) {
+/** Lowercase letters, digits and dashes only: safe in a branch name and a folder name on every system. */
+export function slug(text: string) {
   return text
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
-    .slice(0, 40);
+    .slice(0, 40)
+    .replace(/-$/, "");
 }
 
-export class PrepareError extends Error {}
+/** Whether `child` is `parent` itself or somewhere inside it (case-insensitively on Windows). */
+export function isInside(parent: string, child: string) {
+  const rel = relative(resolve(parent), resolve(child));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * Checks a folder the person maps: it must exist and be a folder. Returns the absolute path to store.
+ * Throws a sentence the CLI can show.
+ */
+export function checkFolder(path: string) {
+  const absolute = resolve(path);
+  if (!existsSync(absolute)) throw new Error(`${absolute} doesn't exist.`);
+  if (!statSync(absolute).isDirectory()) throw new Error(`${absolute} isn't a folder.`);
+  return absolute;
+}
+
+export class PrepareError extends Error {
+  override name = "PrepareError";
+}
 
 /** Gets a run's folder ready, or explains in one line why it can't. */
 export async function prepare(
@@ -54,30 +76,40 @@ export async function prepare(
 ): Promise<Prepared> {
   if (!existsSync(project.path))
     throw new PrepareError(`the folder ${project.path} doesn't exist on this machine`);
-  if (mode === "in_place") {
-    if (busyInPlace) throw new PrepareError("another run is already working in this folder");
-    if (!project.allowDirty && (await isRepo(project.path))) {
-      const dirty = await dirtyFiles(project.path);
-      if (dirty.length > 0)
-        throw new PrepareError(
-          `the folder has ${dirty.length} uncommitted change${dirty.length === 1 ? "" : "s"}; commit or stash them, or allow it with \`yokka-runner map --allow-dirty\``,
-        );
-    }
-    const branch = (await git(project.path, "rev-parse", "--abbrev-ref", "HEAD")).stdout.trim() || undefined;
-    return { cwd: project.path, worktree: false, branch };
-  }
+  return mode === "in_place" ? prepareInPlace(project, busyInPlace) : prepareWorktree(project, card);
+}
 
+/** In place: the mapped folder itself, one run at a time, and never over someone's uncommitted work. */
+async function prepareInPlace(project: ProjectConfig, busy: boolean): Promise<Prepared> {
+  if (busy) throw new PrepareError("another run is already working in this folder");
+  if (!project.allowDirty && (await isRepo(project.path))) {
+    const dirty = await dirtyFiles(project.path);
+    if (dirty.length > 0)
+      throw new PrepareError(
+        `the folder has ${dirty.length} uncommitted change${dirty.length === 1 ? "" : "s"}; commit or stash them, or allow it with \`yokka-runner map --allow-dirty\``,
+      );
+  }
+  const branch = (await git(project.path, "rev-parse", "--abbrev-ref", "HEAD")).stdout.trim() || undefined;
+  return branch ? { cwd: project.path, worktree: false, branch } : { cwd: project.path, worktree: false };
+}
+
+/** A worktree per card, on its own branch, inside the mapped folder. */
+async function prepareWorktree(
+  project: ProjectConfig,
+  card: { ref: string; title: string; launchCode: string },
+): Promise<Prepared> {
   if (!(await isRepo(project.path)))
     throw new PrepareError("worktrees need the folder to be a git repository");
   const base = project.worktree?.base ?? (await defaultBranch(project.path));
-  const branch = `yokka/${slug(card.ref)}-${slug(card.title) || "card"}`.slice(0, 80);
+  const branch = `yokka/${slug(card.ref) || "card"}-${slug(card.title) || "card"}`.slice(0, 80);
   const root = join(project.path, WORKTREES);
   mkdirSync(root, { recursive: true });
   await excludeWorktrees(project.path);
   // A card's earlier run keeps its worktree until the card is done: the next run carries on in it.
   const kept = await worktreeFor(project.path, branch);
   if (kept && existsSync(kept)) return { cwd: kept, worktree: true, branch };
-  const cwd = join(root, `${slug(card.ref)}-${card.launchCode.slice(2)}`);
+  // Both parts are slugs, so the server's ref and launch code can't point the folder outside `root`.
+  const cwd = join(root, `${slug(card.ref) || "card"}-${slug(card.launchCode.slice(2)) || "run"}`);
   // Reuse the card's branch if an earlier run made it; otherwise branch off the base.
   const exists =
     (await git(project.path, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`)).code === 0;
@@ -85,20 +117,22 @@ export async function prepare(
     ? await git(project.path, "worktree", "add", cwd, branch)
     : await git(project.path, "worktree", "add", "-b", branch, cwd, base);
   if (add.code !== 0)
-    throw new PrepareError(`git worktree add failed: ${add.stderr.trim().split("\n").at(-1)}`);
-  if (project.worktree?.setup) {
-    const shell = isWindows ? "cmd.exe" : "/bin/sh";
-    const flag = isWindows ? "/d /s /c" : "-c";
-    const setup = await run(shell, [...flag.split(" "), project.worktree.setup], {
-      cwd,
-      timeoutMs: 15 * 60_000,
-    });
-    if (setup.code !== 0)
-      throw new PrepareError(
-        `the setup command failed: ${setup.stderr.trim().split("\n").at(-1) ?? setup.code}`,
-      );
-  }
+    throw new PrepareError(`git worktree add failed: ${lastLine(add.stderr) ?? `exit ${add.code}`}`);
+  if (project.worktree?.setup) await runSetup(project.worktree.setup, cwd);
   return { cwd, worktree: true, branch };
+}
+
+/** The person's own setup command from their config, run the way they'd type it: through the system shell. */
+async function runSetup(command: string, cwd: string) {
+  const setup = isWindows
+    ? await run("cmd.exe", ["/d", "/s", "/c", command], { cwd, timeoutMs: 15 * 60_000 })
+    : await run("/bin/sh", ["-c", command], { cwd, timeoutMs: 15 * 60_000 });
+  if (setup.code !== 0)
+    throw new PrepareError(`the setup command failed: ${lastLine(setup.stderr) ?? `exit ${setup.code}`}`);
+}
+
+function lastLine(text: string) {
+  return text.trim().split("\n").filter(Boolean).at(-1)?.trim();
 }
 
 /** The worktree that has `branch` checked out, if any. */
@@ -107,7 +141,8 @@ async function worktreeFor(repo: string, branch: string) {
   if (res.code !== 0) return undefined;
   let path: string | undefined;
   for (const line of res.stdout.split(/\r?\n/)) {
-    if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
+    // git prints forward slashes on Windows too; the runner compares and stores native paths.
+    if (line.startsWith("worktree ")) path = resolve(line.slice("worktree ".length));
     else if (line === `branch refs/heads/${branch}`) return path;
   }
   return undefined;
@@ -129,18 +164,23 @@ async function excludeWorktrees(repo: string) {
 }
 
 /** Branch, commits ahead of its upstream or base, and uncommitted files, for the card. */
-export async function gitState(cwd: string, worktree: boolean, base?: string) {
+export async function gitState(cwd: string, worktree: boolean, base?: string): Promise<GitState> {
   if (!(await isRepo(cwd))) return { worktree };
   const branch = (await git(cwd, "rev-parse", "--abbrev-ref", "HEAD")).stdout.trim() || undefined;
   const against = base ?? (await defaultBranch(cwd));
   const ahead = Number((await git(cwd, "rev-list", "--count", `${against}..HEAD`)).stdout.trim()) || 0;
   const dirty = (await dirtyFiles(cwd)).length;
-  return { branch, worktree, ahead, dirty };
+  return branch ? { branch, worktree, ahead, dirty } : { worktree, ahead, dirty };
 }
 
-/** Removes a finished run's worktree when the project asks for it and nothing is left uncommitted. */
+/**
+ * Removes a finished run's worktree when the project asks for it and nothing is left uncommitted. Only ever
+ * a folder inside the project's `.yokka-worktrees/`, whatever the ledger says.
+ */
 export async function cleanup(project: ProjectConfig | undefined, cwd: string, worktree: boolean) {
   if (!worktree || project?.worktree?.cleanup !== "delete") return false;
+  const root = join(project.path, WORKTREES);
+  if (!isInside(root, cwd) || resolve(root) === resolve(cwd)) return false;
   if ((await dirtyFiles(cwd)).length > 0) return false;
   const res = await git(project.path, "worktree", "remove", cwd);
   if (res.code !== 0) return false;

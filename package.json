@@ -33,19 +33,31 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node src/cli.ts",
-    "prepublishOnly": "npm run build"
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "pack:check": "npm pack --dry-run --json | node scripts/checkPack.ts",
+    "check": "npm run typecheck && npm run lint && npm run test:coverage && npm run pack:check",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "convex": "^1.46.0",
     "cross-spawn": "^7.0.6"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
     "@types/cross-spawn": "^6.0.6",
-    "@types/node": "^22.0.0",
-    "typescript": "^5.9.0"
+    "@types/node": "^22.20.4",
+    "@vitest/coverage-istanbul": "^5.0.3",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  },
+  "allowScripts": {
+    "esbuild": true
   },
   "publishConfig": {
     "access": "public",
