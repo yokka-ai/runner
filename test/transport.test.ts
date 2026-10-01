@@ -8,7 +8,7 @@ const convex = vi.hoisted(() => ({
     onUpdate: vi.fn(),
     close: vi.fn(),
   },
-  http: { action: vi.fn() },
+  http: { action: vi.fn(), query: vi.fn() },
   wsOptions: [] as unknown[],
   httpOptions: [] as { fetch?: typeof fetch; logger?: Record<string, (...args: unknown[]) => void> }[],
 }));
@@ -28,6 +28,7 @@ vi.mock("convex/browser", () => ({
       convex.httpOptions.push(options);
     }
     action = convex.http.action;
+    query = convex.http.query;
   },
 }));
 
@@ -87,5 +88,30 @@ describe("httpTransport", () => {
     const init = fetchSpy.mock.calls[0]?.[1];
     expect(init?.method).toBe("POST");
     expect(init?.signal).toBeInstanceOf(AbortSignal);
+    fetchSpy.mockRestore();
+  });
+
+  it("asks runner:* queries by name, and POSTs JSON without following redirects", async () => {
+    convex.http.query.mockResolvedValue({ siteUrl: "https://api.yokka.ai" });
+    const t = httpTransport("https://x.convex.cloud", 1_234);
+    await expect(t.query?.("site", {})).resolves.toEqual({ siteUrl: "https://api.yokka.ai" });
+    expect(nameOf(convex.http.query.mock.calls[0]?.[0])).toBe("runner:site");
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ userCode: "X" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response("not json", { status: 502 }));
+    await expect(t.post?.("https://api.yokka.ai/runner/login", { name: "n" })).resolves.toEqual({
+      status: 200,
+      body: { userCode: "X" },
+    });
+    const init = fetchSpy.mock.calls[0]?.[1];
+    expect(init).toMatchObject({ method: "POST", redirect: "error", body: '{"name":"n"}' });
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    await expect(t.post?.("https://api.yokka.ai/runner/login", {})).resolves.toEqual({
+      status: 502,
+      body: null,
+    });
+    fetchSpy.mockRestore();
   });
 });

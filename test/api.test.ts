@@ -6,6 +6,7 @@ import {
   isAgentId,
   isRevoked,
   isTransient,
+  type LoginTransport,
   liveClient,
   loginClient,
   type Work,
@@ -212,6 +213,76 @@ describe("liveClient", () => {
     );
     fake.push({ revoked: false, runs: [{ ...workRun, status: "paused_by_admin", agent: "cursor" }] });
     expect(updates[0]?.runs[0]?.status).toBe("paused_by_admin");
+  });
+});
+
+describe("loginClient over HTTP", () => {
+  const started = {
+    userCode: "ABCD-EFGH",
+    deviceCode: "secret",
+    verifyUrl: "https://yokka.ai/runner",
+    intervalMs: 2_000,
+    expiresAt: 1,
+  };
+  const args = { name: "n", machine: "m", platform: "p", version: "v" };
+
+  /** A sign-in transport whose `runner:site` answers `site` (or fails) and whose POST answers `post`. */
+  function httpFake(site: unknown, post: (url: string) => { status: number; body: unknown }) {
+    const fake = fakeTransport({ loginStart: () => started });
+    const posts: { url: string; body: Record<string, unknown> }[] = [];
+    const transport: LoginTransport = {
+      action: fake.transport.action,
+      query: async (name) => {
+        if (name !== "site" || site instanceof Error) throw site instanceof Error ? site : new Error(name);
+        return site;
+      },
+      post: async (url, body) => {
+        posts.push({ url, body });
+        return post(url);
+      },
+    };
+    return { transport, posts, actions: () => fake.callsTo("loginStart") };
+  }
+
+  it("starts the sign-in on the deployment's HTTP site, not through the action", async () => {
+    const f = httpFake({ siteUrl: "https://api.yokka.ai" }, () => ({ status: 200, body: started }));
+    await expect(loginClient(f.transport, NO_RETRY).loginStart(args)).resolves.toEqual(started);
+    expect(f.posts).toEqual([{ url: "https://api.yokka.ai/runner/login", body: args }]);
+    expect(f.actions()).toHaveLength(0);
+  });
+
+  it("uses the action on a server without runner:site or without the route", async () => {
+    const noQuery = httpFake(new Error("Could not find public function"), () => ({
+      status: 200,
+      body: started,
+    }));
+    await expect(loginClient(noQuery.transport, NO_RETRY).loginStart(args)).resolves.toEqual(started);
+    expect(noQuery.posts).toHaveLength(0);
+    expect(noQuery.actions()).toHaveLength(1);
+
+    const noRoute = httpFake({ siteUrl: "https://old.convex.site" }, () => ({ status: 404, body: null }));
+    await expect(loginClient(noRoute.transport, NO_RETRY).loginStart(args)).resolves.toEqual(started);
+    expect(noRoute.actions()).toHaveLength(1);
+  });
+
+  it("reports the server's refusal and doesn't go round it through the action", async () => {
+    const f = httpFake({ siteUrl: "https://api.yokka.ai" }, () => ({
+      status: 429,
+      body: { error: "Too many sign-ins started. Try again in 30s." },
+    }));
+    const err = await loginClient(f.transport, NO_RETRY)
+      .loginStart(args)
+      .catch((e: unknown) => e);
+    expect(errorMessage(err)).toBe("Too many sign-ins started. Try again in 30s.");
+    expect(isTransient(err)).toBe(false);
+    expect(f.actions()).toHaveLength(0);
+  });
+
+  it("ignores a site URL that isn't https", async () => {
+    const f = httpFake({ siteUrl: "http://evil.example" }, () => ({ status: 200, body: started }));
+    await loginClient(f.transport, NO_RETRY).loginStart(args);
+    expect(f.posts).toHaveLength(0);
+    expect(f.actions()).toHaveLength(1);
   });
 });
 
