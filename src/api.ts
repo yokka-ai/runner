@@ -19,6 +19,7 @@ import {
   string,
   union,
 } from "./schema.ts";
+import type { Usage } from "./usage.ts";
 import { PROTOCOL, VERSION } from "./version.ts";
 
 /**
@@ -329,6 +330,9 @@ export function liveClient(transport: Transport, token: string, retryOptions: Re
       call("mutation", "heartbeat", { runs }, heartbeatSchema),
     uploaded: (runId: string, attempt: number, uploadId: string, error?: string) =>
       call("mutation", "uploaded", { runId, attempt, uploadId, ...(error ? { error } : {}) }, okSchema),
+    /** What the run's agent spent so far (protocol 3): running totals, which replace the last report. */
+    usage: (runId: string, attempt: number, usage: Usage) =>
+      call("mutation", "usage", { runId, attempt, ...usage }, okSchema),
   };
 }
 

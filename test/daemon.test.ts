@@ -5,6 +5,7 @@ import { ConvexError } from "convex/values";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Adapter, AgentState, Detected, SessionEvents, StartArgs } from "../src/adapters/types.ts";
 import type { LedgerEntry } from "../src/ledger.ts";
+import type { Reading } from "../src/usage.ts";
 
 const workspace = vi.hoisted(() => ({
   prepare: vi.fn(),
@@ -21,7 +22,8 @@ vi.mock("../src/workspace.ts", async (importOriginal) => ({
 
 const { liveClient } = await import("../src/api.ts");
 const configModule = await import("../src/config.ts");
-const { Daemon, POLL_MS, RESUME_PROMPT, contentTypeOf, runDaemon } = await import("../src/daemon.ts");
+const { Daemon, POLL_MS, RESUME_PROMPT, USAGE_EVERY_MS, USAGE_WATCH_MS, contentTypeOf, runDaemon } =
+  await import("../src/daemon.ts");
 const { putEntry, readLedger } = await import("../src/ledger.ts");
 const { PrepareError } = await import("../src/workspace.ts");
 const { claimOk, hello, workRun } = await import("./fixtures.ts");
@@ -72,6 +74,8 @@ function setup(
   opts: {
     agent?: "claude-code" | "codex";
     maxConcurrent?: number;
+    /** The protocol the server announces in `hello`. */
+    protocol?: number;
     handlers?: Record<string, (a: Record<string, unknown>) => unknown>;
   } = {},
 ) {
@@ -86,6 +90,7 @@ function setup(
     update: () => ({ ok: true }),
     heartbeat: () => ({ stop: [] }),
     uploaded: () => ({ ok: true }),
+    usage: () => ({ ok: true }),
     ...opts.handlers,
   });
   const config = {
@@ -101,7 +106,7 @@ function setup(
     live,
     adapters: new Map([[agent, adapter]]),
     detected: new Map([[agent, { version: "1.2.3" }]]),
-    hello,
+    hello: { ...hello, protocol: opts.protocol ?? hello.protocol },
     server: SERVER,
     fetch: fetchMock as unknown as typeof fetch,
   });
@@ -840,7 +845,7 @@ describe("runDaemon", () => {
   it("stops with exit code 1 on a fatal error", async () => {
     tempHome();
     const output = captureOutput();
-    const d = daemonDeps({ hello: () => ({ ...hello, protocol: 3 }) });
+    const d = daemonDeps({ hello: () => ({ ...hello, protocol: 4 }) });
     const running = runDaemon(signedIn(), {
       transport: d.fake.transport,
       adapters: new Map([["claude-code", d.adapter]]),
@@ -848,7 +853,7 @@ describe("runDaemon", () => {
       exit: d.exit,
     });
     await settle();
-    expect(output.errors()).toContain("The server speaks runner protocol 3 (this runner 2)");
+    expect(output.errors()).toContain("The server speaks runner protocol 4 (this runner 3)");
     d.fake.push({ revoked: true, runs: [] });
     await running;
     expect(process.exitCode).toBe(1);
@@ -882,5 +887,113 @@ describe("files", () => {
   it("keeps a run's folder for per-run files", async () => {
     const t = await launched();
     expect(existsSync(join(t.home, "runs", "run1"))).toBe(true);
+  });
+});
+
+describe("reporting usage", () => {
+  const reading = (extra: Partial<Reading> = {}): Reading => ({
+    model: "claude-opus-4-5",
+    inputTokens: 10,
+    outputTokens: 200,
+    cacheReadTokens: 3000,
+    cacheWriteTokens: 40,
+    durationMs: 60_000,
+    final: false,
+    ...extra,
+  });
+
+  /** A launched run whose session reports `current` as its usage. */
+  async function measured(opts: Parameters<typeof setup>[0] = {}) {
+    const t = await launched({ protocol: 3, ...opts });
+    const usage = { current: reading() as Reading | undefined };
+    const read = vi.fn(async () => usage.current);
+    Object.assign(t.session, { usage: read });
+    return { ...t, usage, read };
+  }
+
+  const sent = (t: { fake: ReturnType<typeof fakeTransport> }) => t.fake.callsTo("usage").map((c) => c.args);
+
+  it("sends a working run's totals at most once a minute, and only when they changed", async () => {
+    const t = await measured();
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(sent(t)).toEqual([
+      {
+        token: TOKEN,
+        runId: "run1",
+        attempt: 1,
+        model: "claude-opus-4-5",
+        inputTokens: 10,
+        outputTokens: 200,
+        cacheReadTokens: 3000,
+        cacheWriteTokens: 40,
+        durationMs: 60_000,
+      },
+    ]);
+    t.usage.current = reading({ outputTokens: 500 });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(sent(t)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(USAGE_EVERY_MS);
+    expect(sent(t).at(-1)).toMatchObject({ outputTokens: 500 });
+    const count = sent(t).length;
+    await vi.advanceTimersByTimeAsync(USAGE_EVERY_MS);
+    expect(sent(t)).toHaveLength(count);
+  });
+
+  it("never sends usage to a server older than protocol 3", async () => {
+    const t = await measured({ protocol: 2 });
+    await vi.advanceTimersByTimeAsync(USAGE_EVERY_MS * 2);
+    t.fake.push({ revoked: false, runs: [] });
+    await settle();
+    expect(t.read).not.toHaveBeenCalled();
+    expect(sent(t)).toEqual([]);
+  });
+
+  it("sends a run's last totals when it ends, and keeps reading them until Claude writes its cost", async () => {
+    const t = await measured();
+    t.fake.push({ revoked: false, runs: [] });
+    await settle();
+    expect(sent(t).at(-1)).toMatchObject({ outputTokens: 200 });
+    expect(sent(t).at(-1)).not.toHaveProperty("costUsd");
+    expect(sent(t).at(-1)).not.toHaveProperty("final");
+
+    // The person carries on in the app and closes it: the session's cost appears.
+    t.usage.current = reading({ outputTokens: 900, costUsd: 1.5, final: true });
+    await vi.advanceTimersByTimeAsync(USAGE_EVERY_MS + POLL_MS);
+    expect(sent(t).at(-1)).toMatchObject({ outputTokens: 900, costUsd: 1.5 });
+    const reads = t.read.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(USAGE_EVERY_MS * 3);
+    expect(t.read.mock.calls.length).toBe(reads);
+  });
+
+  it("stops reading a finished run's totals after a day", async () => {
+    const t = await measured();
+    t.fake.push({ revoked: false, runs: [] });
+    await settle();
+    await vi.advanceTimersByTimeAsync(USAGE_WATCH_MS + USAGE_EVERY_MS);
+    const reads = t.read.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(USAGE_EVERY_MS * 3);
+    expect(t.read.mock.calls.length).toBe(reads);
+  });
+
+  it("sends the totals right after a pause, when Claude has just written its cost", async () => {
+    const t = await measured();
+    t.usage.current = reading({ costUsd: 0.4, final: true });
+    t.fake.push({ revoked: false, runs: [held({ pause: true })] });
+    await settle();
+    expect(sent(t).at(-1)).toMatchObject({ costUsd: 0.4 });
+  });
+
+  it("warns about a report the server refused and carries on", async () => {
+    const t = await measured({
+      handlers: {
+        usage: () => {
+          throw new ConvexError({ code: "invalid", message: "nope" });
+        },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(t.output.errors()).toContain("WEB-1: couldn't report usage: nope");
+    await vi.advanceTimersByTimeAsync(USAGE_EVERY_MS);
+    expect(t.fake.callsTo("usage")).toHaveLength(2);
   });
 });

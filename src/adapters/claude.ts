@@ -6,6 +6,7 @@ import type { LedgerEntry } from "../ledger.ts";
 import { sleep as realSleep } from "../net.ts";
 import { argText, isWindows, resolvesToBatch, run } from "../proc.ts";
 import { absent, number, object, string } from "../schema.ts";
+import { readClaudeUsage } from "../usage.ts";
 import type { Adapter, AgentState, Detected, Session, SessionEvents, StartArgs } from "./types.ts";
 
 /**
@@ -229,6 +230,9 @@ function claudeSession(
     },
     async detach() {
       // Background sessions outlive the runner; a restarted runner adopts them from its ledger.
+    },
+    async usage() {
+      return readClaudeUsage(cli.claudeHome, ids, cwd);
     },
   };
 }

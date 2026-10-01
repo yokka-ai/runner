@@ -52,6 +52,9 @@ npx yokka-runner
 4. On **Pause**, stops the agent and keeps its conversation; **Resume** wakes the same session to carry on.
 5. On **Stop**, stops the session.
 6. When the run ends, reports the branch, commits and uncommitted files, and removes the worktree if you asked it to.
+7. Throughout, reports what the agent spent, so the card shows its cost: tokens, model and working time, and the
+   cost in US dollars that Claude Code records (Codex reports none). It reads them from Claude Code's own session
+   transcript or Codex's token counts, never from your code.
 
 Claude sessions outlive the runner: restart it and it picks them back up. Codex threads live in the runner's
 app-server, so stopping the runner ends them (the thread stays in the Codex app).

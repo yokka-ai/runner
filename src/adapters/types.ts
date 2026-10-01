@@ -1,5 +1,6 @@
 import type { AgentId } from "../api.ts";
 import type { LedgerEntry } from "../ledger.ts";
+import type { Reading } from "../usage.ts";
 
 /** What an agent session is doing, as the runner sees it. */
 export type AgentState =
@@ -51,6 +52,8 @@ export interface Session {
   handOff(): Promise<string | undefined>;
   /** Releases what the runner holds without ending the agent's session (runner shutting down). */
   detach(): Promise<void>;
+  /** What the session has spent so far, when the adapter can tell (PROTOCOL.md, `runner:usage`). */
+  usage?(): Promise<Reading | undefined>;
 }
 
 export interface Adapter {

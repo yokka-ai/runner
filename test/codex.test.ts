@@ -204,6 +204,43 @@ describe("codex adapter: a running thread", () => {
     expect(openUrl).toHaveBeenCalledWith("codex://threads/thread-1");
   });
 
+  it("counts the thread's tokens and turn time, with the model Codex started it on", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const server = fakeAppServer({
+        ...happy,
+        "thread/start": () => ({ thread: { id: "thread-1" }, model: "gpt-5-codex" }),
+      });
+      proc.start.mockReturnValue(server.child);
+      const session = await codexAdapter(defaults().agents.codex).start(startArgs, {});
+      expect(await session.usage?.()).toBeUndefined();
+      server.notify("turn/started", { turn: { id: "turn-1" } });
+      await vi.waitFor(async () => expect(await session.state()).toBe("working"));
+      vi.advanceTimersByTime(30_000);
+      server.notify("thread/tokenUsage/updated", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        tokenUsage: {
+          total: { totalTokens: 1500, inputTokens: 1200, cachedInputTokens: 1000, outputTokens: 300 },
+        },
+      });
+      server.notify("turn/completed", { turn: { status: "completed" } });
+      await vi.waitFor(async () => expect(await session.state()).toBe("idle"));
+      expect(await session.usage?.()).toEqual({
+        model: "gpt-5-codex",
+        inputTokens: 200,
+        outputTokens: 300,
+        cacheReadTokens: 1000,
+        cacheWriteTokens: 0,
+        // The turn took the 30 s waited, plus whatever vi.waitFor ticked by.
+        durationMs: expect.toSatisfy((ms: number) => ms >= 30_000 && ms < 31_000),
+        final: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("pauses by interrupting the turn, keeping the app-server and the thread", async () => {
     const { server, session } = await running();
     server.notify("turn/started", { turn: { id: "turn-3" } });

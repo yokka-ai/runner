@@ -1,4 +1,4 @@
-# Runner protocol, version 2
+# Runner protocol, version 3
 
 This is the whole contract between `yokka-runner` and a Yokka deployment. The runner calls Convex functions on
 the server (`https://sync.yokka.ai` unless `login --server` or `YOKKA_SERVER` says otherwise) over the Convex
@@ -57,6 +57,7 @@ minutes.
 | `runner:update` | mutation | `runId`, `attempt`, and any of `status`, `clientSessionId`, `openUrl`, `note`, `summary`, `git` | `{ ok }` |
 | `runner:uploaded` | mutation | `runId`, `attempt`, `uploadId`, `error?` | `{ ok }` |
 | `runner:attach` | mutation | `runId`, `attempt`, `filename`, `contentType?`, `caption?` | `{ ok: false, error }` or `{ ok: true, uploadUrl, filename, contentType, maxBytes }` |
+| `runner:usage` | mutation | `runId`, `attempt`, and any of `model`, `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `costUsd`, `durationMs` | `{ ok }` |
 
 - **Claim** takes a queued run. It checks the runner's and the plan's concurrency limits and bumps `attempt`,
   which fences every later call: an update with an old attempt is ignored. It mints an MCP token for this run
@@ -83,6 +84,21 @@ minutes.
   its `.convex.site` twin, or the origin of the run's `mcp.url`. Files over 20 MB are refused locally.
 - **attach** mints an upload link for a file the runner found itself (a Codex image, say). The server offers it;
   this runner doesn't call it yet.
+- **Usage** (version 3) is what the run's agent has spent so far: **running totals for the attempt, never
+  increments**. Each report replaces the last one, so the runner sends it whenever it changes: at most once a
+  minute while the agent works, and at once when it pauses, is handed over or ends. Tokens are whole counts:
+  `inputTokens` is fresh input (cache reads not included), `cacheReadTokens` and `cacheWriteTokens` the prompt
+  cache's. `costUsd` is the cost in US dollars as the agent counted it; leave it out when the agent doesn't say.
+  `durationMs` is the time the agent spent working, not waiting. The server takes reports after the run ended
+  too, and a runner's report wins over what the agent reports about the same run. Send it only to a server whose
+  `hello` announces protocol 3 or later.
+  - **Claude Code**: read from the session's transcript. Claude Code writes its own totals there (cost, tokens per
+    model, API and tool time) whenever the session's process ends, so the runner takes the last of those and adds
+    the tokens of model calls made since. The cost is final once nothing came after it. A finished run's session
+    stays open to be continued in the app, so the runner keeps reading it, for up to a day, for the cost Claude
+    Code writes when it closes.
+  - **Codex**: the thread's running totals from the app-server's `thread/tokenUsage/updated` notifications, and
+    the time its turns took. Codex reports no cost.
 
 ## What the runner checks
 
@@ -108,6 +124,8 @@ minutes.
 The server announces its protocol in `hello`. Additions that old runners can ignore (a new field in `work`, a new
 optional argument) keep the version. Anything else bumps it, and the server keeps accepting the previous version
 until the minimum is raised.
+
+Version 3 added `runner:usage`; servers still accept version 2 runners, which never call it.
 
 Version 2 removed replies (`messages`, `delivered`), approvals on the card (`approvals`, `requestApproval`) and
 plain-chat questions (`askedInChat`), and added `pause` and the `paused` status; the server refuses version 1.

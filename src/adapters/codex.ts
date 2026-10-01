@@ -4,6 +4,7 @@ import type { CodexConfig } from "../config.ts";
 import { messageOf, warn } from "../log.ts";
 import { withTimeout } from "../net.ts";
 import { killTree, run, start as startProcess } from "../proc.ts";
+import { codexTokens, type Usage } from "../usage.ts";
 import { VERSION } from "../version.ts";
 import type { Adapter, AgentState, Detected, Session, SessionEvents, StartArgs } from "./types.ts";
 
@@ -145,6 +146,11 @@ export function codexAdapter(config: CodexConfig): Adapter {
     let failed: string | undefined;
     let threadId = "";
     let urlSent = false;
+    // What the thread spent: Codex's running token totals, and the time its turns took.
+    let tokens: ReturnType<typeof codexTokens>;
+    let model: string | undefined = config.model;
+    let turnStartedAt: number | undefined;
+    let turnMs = 0;
 
     const send = async (text: string) => {
       working = true;
@@ -158,12 +164,15 @@ export function codexAdapter(config: CodexConfig): Adapter {
 
     server.on("turn/started", (p) => {
       working = true;
+      turnStartedAt ??= Date.now();
       const turn = isJson(p.turn) ? p.turn : {};
       turnId = typeof turn.id === "string" ? turn.id : typeof p.turnId === "string" ? p.turnId : undefined;
     });
     server.on("turn/completed", (p) => {
       working = false;
       turnId = undefined;
+      if (turnStartedAt !== undefined) turnMs += Date.now() - turnStartedAt;
+      turnStartedAt = undefined;
       const turn = isJson(p.turn) ? p.turn : {};
       if (turn.status === "failed") failed = JSON.stringify(turn.error ?? "turn failed").slice(0, 280);
     });
@@ -173,6 +182,9 @@ export function codexAdapter(config: CodexConfig): Adapter {
         urlSent = true;
         events.openUrl?.(`codex://threads/${threadId}`);
       }
+    });
+    server.on("thread/tokenUsage/updated", (p) => {
+      tokens = codexTokens(p) ?? tokens;
     });
     server.onRequest = answerRequest;
 
@@ -192,6 +204,7 @@ export function codexAdapter(config: CodexConfig): Adapter {
     const thread = isJson(started.thread) ? started.thread : {};
     if (typeof thread.id !== "string" || !thread.id) throw new Error("codex started no thread");
     threadId = thread.id;
+    if (typeof started.model === "string" && started.model) model = started.model;
     await server.request("thread/name/set", { threadId, name: args.name }).catch(() => undefined);
     await send(args.prompt);
 
@@ -230,6 +243,13 @@ export function codexAdapter(config: CodexConfig): Adapter {
       async detach() {
         // The thread stays on disk; the runner's hold on it ends with the process.
         await killTree(child);
+      },
+      async usage() {
+        if (!tokens) return undefined;
+        const running = turnStartedAt === undefined ? 0 : Date.now() - turnStartedAt;
+        const usage: Usage = { ...tokens, durationMs: turnMs + running, ...(model ? { model } : {}) };
+        // Codex reports no cost, so there is nothing more to wait for.
+        return { ...usage, final: true };
       },
     };
   }

@@ -21,4 +21,7 @@ export const VERSION = packageVersion();
  * The runner protocol this build speaks (PROTOCOL.md). The server says which it speaks in `hello` and
  * refuses runners older than its minimum.
  */
-export const PROTOCOL = 2;
+export const PROTOCOL = 3;
+
+/** The first protocol with `runner:usage`: the runner reports what its agents spend only to servers that have it. */
+export const USAGE_PROTOCOL = 3;

@@ -27,7 +27,7 @@ import { log, warn } from "./log.ts";
 import { backoff, serverUrl, uploadUrlAllowed } from "./net.ts";
 import { killAll, killAllNow } from "./proc.ts";
 import { SchemaError } from "./schema.ts";
-import { PROTOCOL } from "./version.ts";
+import { PROTOCOL, USAGE_PROTOCOL } from "./version.ts";
 import { cleanup, gitState, isInside, PrepareError, prepare } from "./workspace.ts";
 
 /**
@@ -48,6 +48,13 @@ export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const UPLOAD_TIMEOUT_MS = 2 * 60_000;
 /** How long shutting down may take before the runner stops waiting and ends its children outright. */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
+/** How often a run's usage is read and sent while it works, at most. Ends, pauses and stops send it at once. */
+export const USAGE_EVERY_MS = 60_000;
+/**
+ * How long the runner keeps reading a finished Claude run's usage for the cost Claude writes when the
+ * session's process ends (a run that ends leaves its session open, to be continued in the app).
+ */
+export const USAGE_WATCH_MS = 24 * 60 * 60_000;
 /** Resubscribing after the server failed the work query: backoff bounds. */
 const RESUBSCRIBE_BASE_MS = 1_000;
 const RESUBSCRIBE_MAX_MS = 60_000;
@@ -76,6 +83,9 @@ type Local = {
   /** The run's status on the board, which also knows what the agent did over MCP. */
   serverStatus?: string;
   uploadsSeen: Set<string>;
+  /** The last usage sent for it (as JSON), and when the runner last read it. */
+  usageSent?: string;
+  usageReadAt?: number;
 };
 
 export type DaemonDeps = {
@@ -97,6 +107,8 @@ export class Daemon {
    * stream of claims.
    */
   private tried = new Set<string>();
+  /** Finished runs whose usage isn't final yet (Claude writes its cost when the session ends), until when. */
+  private watching = new Map<string, { local: Local; until: number }>();
   private work: Work = { revoked: false, runs: [] };
   private timers = new Set<NodeJS.Timeout>();
   private unsubscribe: (() => void) | null = null;
@@ -449,12 +461,49 @@ export class Daemon {
       local.busy = true;
       try {
         await this.check(local, local.session);
+        if (!local.ending) await this.sendUsage(local);
       } catch (err) {
         warn(`${local.ref}: ${errorMessage(err)}`);
       } finally {
         local.busy = false;
       }
     }
+    for (const [runId, w] of this.watching) {
+      if (this.stopped) return;
+      const reading = await this.sendUsage(w.local);
+      if (reading?.final || Date.now() > w.until) this.watching.delete(runId);
+    }
+  }
+
+  /**
+   * Reads what the run's agent has spent and sends it when it changed (protocol 3 servers only), at most every
+   * USAGE_EVERY_MS unless `now`. Returns the reading, so a finished run can tell whether its cost is final.
+   */
+  private async sendUsage(local: Local, now = false) {
+    const session = local.session;
+    if (!session?.usage || this.deps.hello.protocol < USAGE_PROTOCOL) return undefined;
+    if (!now && local.usageReadAt !== undefined && Date.now() - local.usageReadAt < USAGE_EVERY_MS)
+      return undefined;
+    local.usageReadAt = Date.now();
+    const reading = await session.usage().catch(() => undefined);
+    if (!reading) return undefined;
+    const { final: _final, ...usage } = reading;
+    const sent = JSON.stringify(usage);
+    if (sent === local.usageSent) return reading;
+    try {
+      await this.live.usage(local.runId, local.attempt, usage);
+      local.usageSent = sent;
+    } catch (err) {
+      warn(`${local.ref}: couldn't report usage: ${errorMessage(err)}`);
+    }
+    return reading;
+  }
+
+  /** Sends a finished run's usage, and keeps reading it until its cost is final (or for a day). */
+  private async lastUsage(local: Local) {
+    const reading = await this.sendUsage(local, true);
+    if (reading && !reading.final)
+      this.watching.set(local.runId, { local, until: Date.now() + USAGE_WATCH_MS });
   }
 
   private async check(local: Local, session: Session) {
@@ -494,6 +543,8 @@ export class Daemon {
       setPaused(local.runId, true);
       await this.report(local, "paused");
       log(`${local.ref}: paused`);
+      // A paused Claude session has just written its cost.
+      await this.sendUsage(local, true);
     } catch (err) {
       warn(`${local.ref}: couldn't pause: ${errorMessage(err)}`);
     } finally {
@@ -571,6 +622,7 @@ export class Daemon {
     if (!local.session) return;
     local.busy = true;
     try {
+      await this.sendUsage(local, true);
       const url = await local.session.handOff();
       local.handedOff = true;
       await this.report(local, "handed_off", url ? { openUrl: url } : {});
@@ -591,6 +643,7 @@ export class Daemon {
     if (local.ending) return;
     local.ending = true;
     if (stopSession && local.session && !alreadyGone) await local.session.stop().catch(() => undefined);
+    await this.lastUsage(local);
     log(`${local.ref}: ${status} (${note})`);
     const git = local.cwd ? await gitState(local.cwd, local.worktree).catch(() => undefined) : undefined;
     await this.report(local, status, { note, ...(git ? { git } : {}) });
@@ -604,6 +657,7 @@ export class Daemon {
     if (local.session) {
       if (stopSession) await local.session.stop().catch(() => undefined);
       else await local.session.detach().catch(() => undefined);
+      await this.lastUsage(local);
     }
     if (local.cwd) {
       const git = await gitState(local.cwd, local.worktree).catch(() => undefined);
@@ -648,6 +702,7 @@ export class Daemon {
     this.unsubscribe?.();
     this.unsubscribe = null;
     for (const local of [...this.runs.values()]) {
+      await this.sendUsage(local, true).catch(() => undefined);
       await local.session?.detach().catch(() => undefined);
       if (local.agent === "codex" && !local.handedOff) {
         await this.report(local, "lost", { note: "the runner stopped" });
