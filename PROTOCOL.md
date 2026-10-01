@@ -22,8 +22,16 @@ The deployment URL must be `https:`; plain `http:` is accepted only for a deploy
 
 | Call | Kind | Arguments | Returns |
 | --- | --- | --- | --- |
+| `runner:site` | query | none | `{ siteUrl }`: the deployment's HTTP site (`https://api.yokka.ai`) |
+| `POST <siteUrl>/runner/login` | HTTP | JSON `{ name, machine, platform, version }` | the same as `runner:loginStart`; `{ error }` with 400, 413 or 429 |
 | `runner:loginStart` | action | `name`, `machine`, `platform`, `version` | `userCode` (`ABCD-EFGH`), `deviceCode` (secret), `verifyUrl`, `intervalMs`, `expiresAt` |
 | `runner:loginPoll` | action | `deviceCode` | `{ status: "pending" \| "denied" \| "expired" }` or `{ status: "approved", token, runnerId, workspace }` |
+
+The runner starts a sign-in over `POST /runner/login`, where the server sees its address: it limits sign-ins
+per address and shows the address to the person approving. It asks `runner:site` where that is, since a custom
+domain's HTTP site can't be derived from the client URL. It uses `runner:loginStart` only when the server
+has neither (older deployments). A refusal from the HTTP route (429, too many sign-ins) is shown as is, never
+retried through the action. A `siteUrl` that isn't HTTPS is ignored.
 
 The runner shows `userCode` and opens `verifyUrl`, where a signed-in person checks the code and picks a
 workspace. The first poll after approval returns the token, once; later polls say `expired`. Codes last ten

@@ -215,6 +215,15 @@ export type Transport = {
   close(): Promise<void>;
 };
 
+/**
+ * What sign-in reaches the deployment through: the actions by name and, over plain HTTPS, a query and a POST
+ * to the deployment's HTTP site. Without the last two, sign-in uses the actions only.
+ */
+export type LoginTransport = Pick<Transport, "action"> & {
+  query?(name: string, args: Record<string, unknown>): Promise<unknown>;
+  post?(url: string, body: Record<string, unknown>): Promise<{ status: number; body: unknown }>;
+};
+
 /** Convex's own console logging, through the runner's redacting log. */
 const convexLogger = {
   logVerbose: () => undefined,
@@ -244,12 +253,25 @@ export function websocketTransport(server: string): Transport {
 }
 
 /** Plain HTTPS calls for one-off commands (sign-in), each with a deadline. */
-export function httpTransport(server: string, timeoutMs = 30_000): Pick<Transport, "action"> {
+export function httpTransport(server: string, timeoutMs = 30_000): LoginTransport {
   const c = new ConvexHttpClient(server, {
     logger: convexLogger,
     fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(timeoutMs) }),
   });
-  return { action: (name, args) => c.action(ref.action(name), args) };
+  return {
+    action: (name, args) => c.action(ref.action(name), args),
+    query: (name, args) => c.query(ref.query(name), args),
+    post: async (url, body) => {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        redirect: "error",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      return { status: res.status, body: await res.json().catch(() => null) };
+    },
+  };
 }
 
 // Clients ----------------------------------------------------------------------------------------------
@@ -268,12 +290,48 @@ const RETRY: RetryOptions = {
     warn(`${errorMessage(err)}; trying again in ${Math.ceil(waitMs / 1000)} s (${attempt})`),
 };
 
+/** Where the deployment's HTTP routes are (`runner:site`), or null when it doesn't say (an older server). */
+async function siteOf(transport: LoginTransport): Promise<string | null> {
+  if (!transport.query) return null;
+  try {
+    const answer: unknown = await transport.query("site", {});
+    const siteUrl =
+      typeof answer === "object" && answer !== null && "siteUrl" in answer ? answer.siteUrl : undefined;
+    return typeof siteUrl === "string" && httpUrl(siteUrl) ? new URL(siteUrl).origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Starts a sign-in over `POST /runner/login` on the deployment's HTTP site, where the server can limit
+ * sign-ins per address and show the person approving where this one came from. A server without that route
+ * (older deployments) gets the `runner:loginStart` action instead. The server refusing (too many sign-ins)
+ * is an error like the action's, never a reason to go round it through the action.
+ */
+async function startLogin(transport: LoginTransport, args: Record<string, unknown>): Promise<unknown> {
+  const site = await siteOf(transport);
+  if (site && transport.post) {
+    const res = await transport.post(`${site}/runner/login`, args);
+    if (res.status === 200) return res.body;
+    if (res.status !== 404) {
+      const said =
+        typeof res.body === "object" && res.body !== null && "error" in res.body ? res.body.error : undefined;
+      const message = typeof said === "string" ? said : `The server answered HTTP ${res.status}.`;
+      // A server error may pass, so it's retried; a refusal is an app error, like the action's.
+      if (res.status >= 500) throw new Error(message);
+      throw new ConvexError({ code: res.status === 429 ? "rate_limited" : "invalid", message });
+    }
+  }
+  return transport.action("loginStart", args);
+}
+
 /** Sign-in calls for `login`. */
-export function loginClient(transport: Pick<Transport, "action">, retryOptions: RetryOptions = RETRY) {
+export function loginClient(transport: LoginTransport, retryOptions: RetryOptions = RETRY) {
   return {
     loginStart: (args: { name: string; machine: string; platform: string; version: string }) =>
       retry(
-        async () => parse(loginStartSchema, await transport.action("loginStart", args), "loginStart"),
+        async () => parse(loginStartSchema, await startLogin(transport, args), "loginStart"),
         retryOptions,
       ),
     loginPoll: (deviceCode: string) =>
