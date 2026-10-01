@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SERVER, liveClient, loginClient } from "../src/api.ts";
 import { type CliDeps, main } from "../src/commands.ts";
 import { type Config, configPath, defaults, loadConfig, saveConfig } from "../src/config.ts";
 import { VERSION } from "../src/version.ts";
+import { canonical } from "../src/workspace.ts";
 import { hello } from "./fixtures.ts";
 import { captureOutput, fakeTransport, tempDir, tempHome } from "./helpers.ts";
 
@@ -164,7 +165,7 @@ describe("login", () => {
 
 describe("map and unmap", () => {
   function gitRepo() {
-    const dir = realpathSync(tempDir("yokka-map-"));
+    const dir = canonical(tempDir("yokka-map-"));
     execFileSync("git", ["init", "-q"], { cwd: dir });
     return dir;
   }
@@ -278,7 +279,7 @@ describe("start", () => {
     expect(d.runDaemon).toHaveBeenCalledWith(
       expect.objectContaining({
         token: TOKEN,
-        projects: { p1: expect.objectContaining({ path: realpathSync(folder) }) },
+        projects: { p1: expect.objectContaining({ path: canonical(folder) }) },
       }),
     );
   });

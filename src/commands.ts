@@ -1,4 +1,3 @@
-import { realpathSync } from "node:fs";
 import { hostname, platform, release } from "node:os";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -31,7 +30,7 @@ import { print } from "./log.ts";
 import { openableUrl, serverUrl, sleep } from "./net.ts";
 import { openUrl } from "./proc.ts";
 import { PROTOCOL, VERSION } from "./version.ts";
-import { checkFolder, isRepo } from "./workspace.ts";
+import { canonical, checkFolder, isRepo } from "./workspace.ts";
 
 const HELP = `yokka-runner ${VERSION}: starts Claude Code and Codex on this machine for cards on your Yokka board.
 
@@ -231,7 +230,7 @@ async function pickMode(deps: CliDeps, option: string | undefined, path: string)
 /** Links a folder to one of the workspace's projects and tells the board, so Start offers this runner. */
 export async function map(config: Config, deps: CliDeps, folder: string, opts: Options) {
   if (!config.server || !config.token) throw new Error("Sign in first: yokka-runner login");
-  const path = realpathSync(checkFolder(folder));
+  const path = canonical(checkFolder(folder));
   const live = deps.liveClient(config.server, config.token);
   try {
     const hello = await live.hello({ projects: projectModes(config), maxConcurrent: config.maxConcurrent });

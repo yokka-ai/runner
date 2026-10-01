@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { GitState } from "./api.ts";
 import type { ProjectConfig, WorkspaceModeName } from "./config.ts";
@@ -53,6 +53,18 @@ export function isInside(parent: string, child: string) {
 }
 
 /**
+ * One spelling per folder: the real path with Windows short names (`RUNNER~1`) expanded, the way git prints
+ * worktree paths. Falls back to the plain absolute path for a folder that doesn't exist.
+ */
+export function canonical(path: string) {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
  * Checks a folder the person maps: it must exist and be a folder. Returns the absolute path to store.
  * Throws a sentence the CLI can show.
  */
@@ -102,7 +114,9 @@ async function prepareWorktree(
     throw new PrepareError("worktrees need the folder to be a git repository");
   const base = project.worktree?.base ?? (await defaultBranch(project.path));
   const branch = `yokka/${slug(card.ref) || "card"}-${slug(card.title) || "card"}`.slice(0, 80);
-  const root = join(project.path, WORKTREES);
+  // Canonical, so a new worktree's path matches the one git reports when the card's next run reuses it,
+  // even for a folder mapped before paths were stored canonically.
+  const root = join(canonical(project.path), WORKTREES);
   mkdirSync(root, { recursive: true });
   await excludeWorktrees(project.path);
   // A card's earlier run keeps its worktree until the card is done: the next run carries on in it.
@@ -142,7 +156,7 @@ async function worktreeFor(repo: string, branch: string) {
   let path: string | undefined;
   for (const line of res.stdout.split(/\r?\n/)) {
     // git prints forward slashes on Windows too; the runner compares and stores native paths.
-    if (line.startsWith("worktree ")) path = resolve(line.slice("worktree ".length));
+    if (line.startsWith("worktree ")) path = canonical(line.slice("worktree ".length));
     else if (line === `branch refs/heads/${branch}`) return path;
   }
   return undefined;
@@ -179,11 +193,12 @@ export async function gitState(cwd: string, worktree: boolean, base?: string): P
  */
 export async function cleanup(project: ProjectConfig | undefined, cwd: string, worktree: boolean) {
   if (!worktree || project?.worktree?.cleanup !== "delete") return false;
-  const root = join(project.path, WORKTREES);
-  if (!isInside(root, cwd) || resolve(root) === resolve(cwd)) return false;
-  if ((await dirtyFiles(cwd)).length > 0) return false;
-  const res = await git(project.path, "worktree", "remove", cwd);
+  const root = canonical(join(project.path, WORKTREES));
+  const folder = canonical(cwd);
+  if (!isInside(root, folder) || root === folder) return false;
+  if ((await dirtyFiles(folder)).length > 0) return false;
+  const res = await git(project.path, "worktree", "remove", folder);
   if (res.code !== 0) return false;
-  rmSync(cwd, { recursive: true, force: true });
+  rmSync(folder, { recursive: true, force: true });
   return true;
 }

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ProjectConfig } from "../src/config.ts";
 import {
+  canonical,
   checkFolder,
   cleanup,
   dirtyFiles,
@@ -27,7 +28,10 @@ function git(cwd: string, ...args: string[]) {
   });
 }
 
-/** A repository with one commit on `main`. */
+/**
+ * A repository with one commit on `main`. Its path keeps any Windows short names (RUNNER~1 on CI), like a
+ * folder mapped before the runner stored paths canonically.
+ */
 function repo() {
   const dir = realpathSync(tempDir("yokka-repo-"));
   git(dir, "init", "-q", "-b", "main");
@@ -115,7 +119,8 @@ describe("prepare a worktree", () => {
     const dir = repo();
     const where = await prepare(project(dir, { mode: "worktree" }), "worktree", card, false);
     expect(where).toEqual({
-      cwd: join(dir, WORKTREES, "web-1-abc123"),
+      // Canonical: on Windows the temp folder can come back as a short name (RUNNER~1) that git expands.
+      cwd: join(canonical(dir), WORKTREES, "web-1-abc123"),
       worktree: true,
       branch: "yokka/web-1-fix-the-thing",
     });
@@ -137,7 +142,7 @@ describe("prepare a worktree", () => {
       { ref: "../../x", title: "", launchCode: "r_../../y" },
       false,
     );
-    expect(isInside(join(dir, WORKTREES), where.cwd)).toBe(true);
+    expect(isInside(join(canonical(dir), WORKTREES), where.cwd)).toBe(true);
     expect(where.branch).toBe("yokka/x-card");
   });
 
